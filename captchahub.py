@@ -12,6 +12,7 @@ CaptchaHub v1.0 - 企业级验证码识别平台
 import os, sys, json, time, base64, re, threading
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -81,6 +82,13 @@ class OCREngine:
 engine = OCREngine()
 
 # ─── Dashboard HTML ────────────────────────────────────────
+# Add static file route
+STATIC_DIR = Path(__file__).parent / 'static'
+
+@app.route('/static/<path:filename>')
+def static_files(filename):
+    return send_from_directory(str(STATIC_DIR), filename)
+
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -172,8 +180,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="result" id="resultBox">等待输入...</div>
 </div>
 
+<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:20px;text-align:center">
+<h2 style="font-size:16px;margin-bottom:10px">打赏支持</h2>
+<p style="font-size:13px;color:#8b949e;margin-bottom:10px">如果这个工具帮到了您，欢迎打赏支持持续开发！</p>
+<img src="/static/zan.png" style="max-width:200px;border-radius:8px;margin-bottom:10px" alt="赞赏码">
+<p style="font-size:12px;color:#8b949e">USDT (ERC20): 0xAfe9B67B1DF618FAeD32dC71E3458cf549f26697</p>
+</div>
+
 <div class="footer">
-Powered by CaptchaHub | Wallet: 0xAfe9B67B1DF618FAeD32dC71E3458cf549f26697
+Powered by CaptchaHub
 </div>
 </div>
 
