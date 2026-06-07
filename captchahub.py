@@ -130,12 +130,12 @@ def record_request(endpoint: str, method: str, success: bool,
         cursor = db.cursor()
         now = datetime.now()
         identity = request.headers.get("X-API-Key") or request.args.get("api_key") or ip
-    cursor.execute(
-        "INSERT INTO request_log (timestamp, endpoint, method, success, result, time_ms, ip, api_identity) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (now.isoformat(), endpoint, method, int(success),
-         str(result)[:200], time_ms, ip, identity)
-    )
+        cursor.execute(
+            "INSERT INTO request_log (timestamp, endpoint, method, success, result, time_ms, ip, api_identity) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (now.isoformat(), endpoint, method, int(success),
+             str(result)[:200], time_ms, ip, identity)
+        )
         today = now.strftime("%Y-%m-%d")
         cursor.execute(
             """INSERT INTO daily_stats (date, total_requests, success_count, fail_count, avg_time_ms)
