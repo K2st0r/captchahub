@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  captchahub:
+    build: .
+    container_name: captchahub
+    restart: unless-stopped
+    ports:
+      - "9527:9527"
+    environment:
+      - PORT=9527
+      # Uncomment to enable API key authentication + tiered pricing:
+      # - CAPTCHAHUB_KEYS=sk_pro_example,sk_unlimited_example
+      # - CAPTCHAHUB_PLANS={"sk_pro_example":"pro","sk_unlimited_example":"unlimited"}
+    volumes:
+      - ./data:/app/data
+      - ./static:/app/static
