@@ -1,4 +1,4 @@
-[build-system]
+﻿[build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.backends._legacy:_Backend"
 
@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 dependencies = [
-    "ddddocr>=2.0.0",
+    "ddddocr>=1.6.1,<2.0",
     "flask>=3.0",
     "flask-cors>=4.0",
     "pillow>=10.0",
@@ -34,4 +34,4 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/K2st0r/captchahub"
 Repository = "https://github.com/K2st0r/captchahub"
-Donate = "https://github.com/K2st0r/captchahub#donate--打赏"
+Donate = "https://github.com/K2st0r/captchahub#donate--鎵撹祻"
