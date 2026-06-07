@@ -36,6 +36,31 @@
 
 ---
 
+## 📡 Live API Service
+
+CaptchaHub is running 24/7 as a **paid API service**:
+
+| Tier     | Price    | Daily Limit | Try It                                                                  |
+|----------|----------|-------------|-------------------------------------------------------------------------|
+| **Free** | $0       | 100 req     | `curl https://suse-collar-rats-foot.trycloudflare.com/api/v1/health`    |
+| **Pro**  | **$10/mo** | 10,000 req  | Buy: k2st0r@users.noreply.github.com                                    |
+| **Unlimited** | **$50/mo** | Unlimited | Buy: k2st0r@users.noreply.github.com                                    |
+
+```bash
+# Test the live API
+curl https://suse-collar-rats-foot.trycloudflare.com/api/v1/health
+
+# Check your usage (anonymous = Free tier)
+curl https://suse-collar-rats-foot.trycloudflare.com/api/v1/usage
+
+# With a Pro API key
+curl -H "X-API-Key: sk_pro_YOUR_KEY" https://suse-collar-rats-foot.trycloudflare.com/api/v1/usage
+```
+
+**Pay with USDT (ERC20):** `0xAfe9B67B1DF618FAeD32dC71E3458cf549f26697`
+
+---
+
 ## English
 
 ### What is CaptchaHub?
