@@ -32,8 +32,21 @@ import ddddocr
 from flask import Flask, request, jsonify, render_template_string, send_from_directory, g
 from flask_cors import CORS
 
+# ─── Pricing / Monetization ────────────────────────────
+# "free"   — 100 req/day, no API key needed
+# "pro"    — 10,000 req/day, needs API key
+# "unlimited" — no limit, needs API key
+# Set CAPTCHAHUB_PLANS={"sk_pro":"pro","sk_unl":"unlimited"} in env
+# Each tier's daily limit is enforced by the rate limiter below.
+
+PLANS = {
+    "free":      {"daily_limit": 100,   "price_usdt": 0,   "label": "Free"},
+    "pro":       {"daily_limit": 10000, "price_usdt": 10,  "label": "Pro"},
+    "unlimited": {"daily_limit": 0,     "price_usdt": 50,  "label": "Unlimited"},
+}
+
 # ─── Metadata ───────────────────────────────────────────────
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 __author__  = "K2st0r"
 __license__ = "MIT"
 __wallet__  = "0xAfe9B67B1DF618FAeD32dC71E3458cf549f26697"
@@ -76,14 +89,24 @@ def init_db() -> None:
     cursor = db.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS request_log (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp   TEXT    NOT NULL,
-            endpoint    TEXT    NOT NULL,
-            method      TEXT    NOT NULL DEFAULT 'POST',
-            success     INTEGER NOT NULL DEFAULT 1,
-            result      TEXT,
-            time_ms     REAL,
-            ip          TEXT
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp     TEXT    NOT NULL,
+            endpoint      TEXT    NOT NULL,
+            method        TEXT    NOT NULL DEFAULT 'POST',
+            success       INTEGER NOT NULL DEFAULT 1,
+            result        TEXT,
+            time_ms       REAL,
+            ip            TEXT,
+            api_identity  TEXT    DEFAULT 'anonymous'
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS api_keys (
+            key_id    TEXT PRIMARY KEY,
+            plan      TEXT NOT NULL DEFAULT 'pro',
+            owner     TEXT DEFAULT '',
+            created   TEXT NOT NULL,
+            enabled   INTEGER DEFAULT 1
         )
     """)
     cursor.execute("""
@@ -106,12 +129,13 @@ def record_request(endpoint: str, method: str, success: bool,
         db = sqlite3.connect(str(DB_PATH))
         cursor = db.cursor()
         now = datetime.now()
-        cursor.execute(
-            "INSERT INTO request_log (timestamp, endpoint, method, success, result, time_ms, ip) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (now.isoformat(), endpoint, method, int(success),
-             str(result)[:200], time_ms, ip)
-        )
+        identity = request.headers.get("X-API-Key") or request.args.get("api_key") or ip
+    cursor.execute(
+        "INSERT INTO request_log (timestamp, endpoint, method, success, result, time_ms, ip, api_identity) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (now.isoformat(), endpoint, method, int(success),
+         str(result)[:200], time_ms, ip, identity)
+    )
         today = now.strftime("%Y-%m-%d")
         cursor.execute(
             """INSERT INTO daily_stats (date, total_requests, success_count, fail_count, avg_time_ms)
@@ -132,21 +156,75 @@ def record_request(endpoint: str, method: str, success: bool,
 init_db()
 
 # ─── Authentication (optional) ──────────────────────────────
-API_KEYS: set = set()
+API_KEYS: Dict[str, str] = {}  # key -> plan (pro|unlimited)
 _env_keys = os.environ.get("CAPTCHAHUB_KEYS", "")
+_env_plans = os.environ.get("CAPTCHAHUB_PLANS", "")
 if _env_keys:
-    API_KEYS = set(k.strip() for k in _env_keys.split(",") if k.strip())
+    for k in _env_keys.split(","):
+        k = k.strip()
+        if k:
+            API_KEYS[k] = "pro"  # default plan
+if _env_plans:
+    try:
+        parsed = json.loads(_env_plans)
+        if isinstance(parsed, dict):
+            API_KEYS.update(parsed)
+    except json.JSONDecodeError:
+        log.warning("Invalid CAPTCHAHUB_PLANS JSON, using defaults")
+
+def get_key_info():
+    """Return (api_key, plan) for the current request, or (None, 'free') if no key."""
+    key = request.headers.get("X-API-Key") or request.args.get("api_key")
+    if key and key in API_KEYS:
+        return key, API_KEYS[key]
+    return None, "free"
+
+def rate_limited(f):
+    """Decorator: enforce daily rate limit per API key / IP."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        key, plan = get_key_info()
+        plan_cfg = PLANS.get(plan, PLANS["free"])
+        limit = plan_cfg["daily_limit"]
+        if limit == 0:  # unlimited
+            return f(*args, **kwargs)
+        # Count today's usage (key-based if available, else IP-based)
+        identity = key or request.remote_addr or "unknown"
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            db = sqlite3.connect(str(DB_PATH))
+            row = db.execute(
+                "SELECT COUNT(*) as cnt FROM request_log WHERE date(api_identity)=? AND api_identity=?",
+                (today, identity)
+            ).fetchone()
+            count = row[0] if row else 0
+            db.close()
+        except Exception:
+            count = 0
+        if count >= limit:
+            retry = datetime.now().replace(hour=23, minute=59, second=59)
+            reset_utc = int(retry.timestamp())
+            return jsonify({
+                "success": False,
+                "error": f"Daily limit reached ({limit}/day). Upgrade at /pricing",
+                "plan": plan,
+                "used_today": count,
+                "limit": limit,
+                "resets_at": reset_utc,
+            }), 429
+        return f(*args, **kwargs)
+    return decorated
 
 def require_auth(f):
     """Decorator: enforce API key authentication if configured."""
     @wraps(f)
     def decorated(*args, **kwargs):
+        key, plan = get_key_info()
         if not API_KEYS:
             return f(*args, **kwargs)
-        key = request.headers.get("X-API-Key") or request.args.get("api_key")
-        if key in API_KEYS:
+        if key and key in API_KEYS:
             return f(*args, **kwargs)
-        return jsonify({"success": False, "error": "Invalid or missing API key"}), 401
+        return jsonify({"success": False, "error": "Valid API key required. Get one at /pricing"}), 401
     return decorated
 
 # ─── OCR Engine ─────────────────────────────────────────────
@@ -270,7 +348,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Micr
 .badges{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .badge{font-size:10px;padding:2px 8px;border-radius:99px;font-weight:600}
 .badge.py{background:#1f6feb22;color:var(--blue)}.badge.mit{background:#3fb95022;color:var(--green)}.badge.flask{background:#d2a8ff22;color:var(--purple)}
-.wallet{font-size:11px;color:var(--muted)}.wallet code{color:var(--purple)}
+.wallet{font-size:11px;color:var(--muted)}.wallet code{color:var(--purple)}.wallet a{color:var(--green);text-decoration:none}.wallet a:hover{text-decoration:underline}
 /* stats */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px;text-align:center}
@@ -298,6 +376,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Micr
 .try button{background:#238636;color:#fff;border:none;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600}.try button:hover{background:#2ea043}
 .try button.btn2{background:#30363d}.try button.btn2:hover{background:#484f58}
 .try .out{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:12px;margin-top:10px;font-family:monospace;font-size:12px;min-height:44px;white-space:pre-wrap;word-break:break-all}
+/* pricing */
+.pricing-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:12px 0}
+.pcard{background:var(--bg);border:1px solid var(--bd);border-radius:12px;padding:20px;text-align:center;position:relative}
+.pcard:hover{border-color:var(--blue)}
+.pcard.pro{border-color:var(--green);box-shadow:0 0 20px rgba(63,185,80,.15)}
+.pcard .pop{position:absolute;top:-8px;left:50%;transform:translateX(-50%);background:var(--green);color:#000;font-size:9px;font-weight:800;padding:2px 12px;border-radius:99px;letter-spacing:1px}
+.pcard h3{font-size:14px;margin-bottom:8px}
+.pcard .price .amt{font-size:28px;font-weight:800;color:var(--fg)}
+.pcard .price .per{font-size:11px;color:var(--muted)}
+.pcard ul{list-style:none;margin:12px 0;padding:0;font-size:12px}
+.pcard ul li{padding:4px 0;color:var(--fg2)}
+.pcard ul li::before{content:'✓ ';color:var(--green)}
+.buy-btn{background:linear-gradient(135deg,var(--green),#2ea043);color:#000;border:none;padding:10px 28px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700}
+.buy-btn:hover{opacity:.9}
 /* donate */
 .donate{text-align:center}
 .donate img{max-width:200px;border-radius:12px;margin:8px 0;border:2px solid var(--bd)}
@@ -315,7 +407,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Micr
 <h1>CaptchaHub<span class="tag">v2.1.0</span></h1>
 <div class="badges"><span class="badge py">Python</span><span class="badge flask">Flask</span><span class="badge mit">MIT</span></div>
 </div>
-<div class="wallet">Donate: <code>0xAfe9B67B…f26697</code> (USDT/ERC20)</div>
+<div class="wallet">Donate: <code>0xAfe9B67B…f26697</code> (USDT/ERC20) | <a href="#pricing" style="color:var(--green)">Pricing</a></div>
 </div>
 
 <div class="stats">
@@ -334,6 +426,48 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Micr
 <div class="ep"><span class="m post">POST</span><span class="path">/api/v1/upload</span><div class="desc">File upload</div></div>
 <div class="ep"><span class="m get">GET</span><span class="path">/api/v1/stats</span><div class="desc">Statistics</div></div>
 <div class="ep"><span class="m get">GET</span><span class="path">/health</span><div class="desc">Health check</div></div>
+</div>
+</div>
+
+<div class="sec" id="pricing">
+<h2>Pricing / 定价</h2>
+<div class="pricing-cards" id="pricing-cards">
+<div class="pcard free">
+<h3>Free</h3>
+<div class="price"><span class="amt">$0</span> <span class="per">/month</span></div>
+<ul>
+<li>100 requests/day</li>
+<li>No API key needed</li>
+<li>Basic OCR support</li>
+</ul>
+</div>
+<div class="pcard pro">
+<div class="pop">POPULAR</div>
+<h3>Pro</h3>
+<div class="price"><span class="amt">$10</span> <span class="per">/month</span></div>
+<ul>
+<li>10,000 requests/day</li>
+<li>API key access</li>
+<li>Batch processing</li>
+<li>Priority support</li>
+</ul>
+</div>
+<div class="pcard unl">
+<h3>Unlimited</h3>
+<div class="price"><span class="amt">$50</span> <span class="per">/month</span></div>
+<ul>
+<li>Unlimited requests</li>
+<li>API key access</li>
+<li>All features</li>
+<li>24/7 support</li>
+</ul>
+</div>
+</div>
+<div class="usage-info" id="usage-info" style="text-align:center;margin-top:16px;font-size:13px;color:var(--muted)">
+Checking usage...
+</div>
+<div style="text-align:center;margin-top:10px">
+<button class="buy-btn" onclick="contactBuy()">Buy Pro / 购买 &rarr;</button>
 </div>
 </div>
 
@@ -380,6 +514,9 @@ async function test(){
  }catch(e){document.getElementById('out').textContent='Error: '+e.message}
 }
 function clearTest(){document.getElementById('in').value='';document.getElementById('out').textContent='Waiting for input…'}
+function contactBuy(){window.location.href='mailto:k2st0r@users.noreply.github.com?subject=CaptchaHub%20Pro%20Purchase&body=I%20want%20to%20buy%20a%20Pro%20or%20Unlimited%20plan.%20My%20preferred%20payment%20is%20USDT(ERC20).';}
+async function checkUsage(){try{const r=await fetch('/api/v1/usage');const d=await r.json();const e=document.getElementById('usage-info');if(d.api_key){e.innerHTML='<span style="color:var(--green)">✔ Plan: <b>'+d.plan+'</b> &middot; Used: '+d.used_today+'/'+(d.limit||'∞')+' today</span>';}else{e.innerHTML='<span style="color:var(--blue)">ℹ Free tier: '+d.used_today+'/'+d.limit+' requests used today. <a href="#pricing" style="color:var(--green)">Upgrade</a> for more.</span>'}}catch(e){}}
+setInterval(checkUsage,5000);checkUsage();
 </script>
 </body>
 </html>"""
@@ -410,6 +547,7 @@ def static_files(filename: str):
 # ── API v1 ──────────────────────────────────────────────
 
 @app.route("/api/v1/recognize", methods=["POST"])
+@rate_limited
 @require_auth
 def api_recognize():
     """
@@ -480,6 +618,7 @@ def api_slide():
     return jsonify(result)
 
 @app.route("/api/v1/batch", methods=["POST"])
+@rate_limited
 @require_auth
 def api_batch():
     """
@@ -503,6 +642,37 @@ def api_batch():
     record_request("/api/v1/batch", "POST", True, f"{ok}/{len(results)}", 0, request.remote_addr or "unknown")
     return jsonify({"success": True, "count": len(results), "success_count": ok, "results": results})
 
+@app.route("/pricing")
+def pricing_page():
+    """Redirect to dashboard pricing section."""
+    return render_template_string(DASHBOARD_HTML)
+
+@app.route("/api/v1/usage")
+def api_usage():
+    """Return usage info for the current key/IP (used by dashboard UI)."""
+    key, plan = get_key_info()
+    plan_cfg = PLANS.get(plan, PLANS["free"])
+    limit = plan_cfg["daily_limit"]
+    identity = key or request.remote_addr or "unknown"
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        db = sqlite3.connect(str(DB_PATH))
+        row = db.execute(
+            "SELECT COUNT(*) as cnt FROM request_log WHERE date(timestamp)=? AND api_identity=?",
+            (today, identity)
+        ).fetchone()
+        count = row[0] if row else 0
+        db.close()
+    except Exception:
+        count = 0
+    return jsonify({
+        "api_key": bool(key),
+        "plan": plan,
+        "used_today": count,
+        "limit": limit if limit else "unlimited",
+        "plan_label": plan_cfg["label"],
+    })
+
 @app.route("/api/v1/stats")
 def api_stats():
     """Return platform statistics (global + today)."""
@@ -523,15 +693,18 @@ if __name__ == "__main__":
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║   CaptchaHub v{__version__:<44}║
-║   企业级验证码识别平台                                        ║
+║   Enterprise OCR + Premium Pricing                            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║   Web:    http://0.0.0.0:{port:<39}║
 ║   API:    http://0.0.0.0:{port}/api/v1/recognize{'':<22}║
 ║   Stats:  http://0.0.0.0:{port}/api/v1/stats{'':<25}║
+║   Usage:  http://0.0.0.0:{port}/api/v1/usage{'':<26}║
 ║   Health: http://0.0.0.0:{port}/health{'':<29}║
 ╠══════════════════════════════════════════════════════════════╣
+║   Pricing: Free (100/d) | Pro $10/mo (10k/d) | Unlimited $50/mo ║
 ║   DB:     {str(DB_PATH):<47}║
 ║   License: MIT                                                ║
+║   Buy:    k2st0r@users.noreply.github.com                     ║
 ║   Donate: {__wallet__}  ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
